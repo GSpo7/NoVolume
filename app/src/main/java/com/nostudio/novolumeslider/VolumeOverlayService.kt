@@ -498,7 +498,7 @@ class VolumeOverlayService : Service() {
         val appPrefs = getSharedPreferences("AppPrefs", Context.MODE_PRIVATE)
         val volumeNumberDisplayEnabled = appPrefs.getBoolean("volume_number_display_enabled", true)
 
-        if (volumeNumberDisplayEnabled && !volumeDial.isInPopOutMode()) {
+        if (volumeNumberDisplayEnabled && !volumeDial.isInPopOutMode() && !volumeDial.isInQuickActionMode()) {
             volumeNumber.text = volumePercentage.toString()
             volumeNumber.visibility = View.VISIBLE
 

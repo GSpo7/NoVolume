@@ -19,12 +19,16 @@ import android.view.HapticFeedbackConstants
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.ActivityResultLauncher
 import android.os.Looper
+import android.app.NotificationManager
+import android.util.Log
 
 class MainActivity : AppCompatActivity() {
 
     private val PREFS_NAME = "AppPrefs"
 
     private lateinit var overlayPermissionLauncher: ActivityResultLauncher<Intent>
+    private lateinit var dndPermissionLauncher: ActivityResultLauncher<Intent>
+    private lateinit var volumeStreamManager: VolumeStreamManager
 
     override fun onCreate(savedInstanceState: Bundle?) {
         val hideOverlayHandler = Handler(Looper.getMainLooper())
@@ -32,6 +36,9 @@ class MainActivity : AppCompatActivity() {
 
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        
+        // Initialize volume stream manager
+        volumeStreamManager = VolumeStreamManager(this)
 
         // Initialize modern activity result launcher
         overlayPermissionLauncher = registerForActivityResult(
@@ -44,6 +51,18 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Overlay permission is required", Toast.LENGTH_SHORT).show()
             }
         }
+        
+        // Initialize DND permission launcher
+        dndPermissionLauncher = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            // Check if DND permission was granted
+            if (volumeStreamManager.isDndAccessGranted()) {
+                Toast.makeText(this, "Do Not Disturb access granted", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(this, "Do Not Disturb access is required for full functionality", Toast.LENGTH_SHORT).show()
+            }
+        }
 
         val overlayPermissionButton: Button = findViewById(R.id.overlayPermissionButton)
         overlayPermissionButton.setOnClickListener {
@@ -52,7 +71,7 @@ class MainActivity : AppCompatActivity() {
                     Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
                     Uri.parse("package:$packageName")
                 )
-                overlayPermissionLauncher.launch(intent) // Use modern API
+                overlayPermissionLauncher.launch(intent)
             } else {
                 startOverlayService()
             }
@@ -62,6 +81,16 @@ class MainActivity : AppCompatActivity() {
         accessibilitySettingsButton.setOnClickListener {
             val accessibilityIntent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
             startActivity(accessibilityIntent)
+        }
+        
+        val dndPermissionButton: Button = findViewById(R.id.dndPermissionButton)
+        dndPermissionButton.setOnClickListener {
+            if (!volumeStreamManager.isDndAccessGranted()) {
+                val intent = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+                dndPermissionLauncher.launch(intent)
+            } else {
+                Toast.makeText(this, "Do Not Disturb access already granted", Toast.LENGTH_SHORT).show()
+            }
         }
 
         val positionSlider: SeekBar = findViewById(R.id.overlayPositionSlider)
@@ -116,14 +145,14 @@ class MainActivity : AppCompatActivity() {
         })
 
         // Haptic Feedback Switch (now in the toggle row)
-        val hapticFeedbackSwitch: Switch = findViewById(R.id.hapticToggleSwitch)
+        val hapticFeedbackSwitch: CustomAnimatedSwitch = findViewById(R.id.hapticToggleSwitch)
 
         // Retrieve saved haptic feedback setting (default enabled)
         val hapticEnabled = prefs.getBoolean("haptic_feedback_enabled", true)
-        hapticFeedbackSwitch.isChecked = hapticEnabled
+        hapticFeedbackSwitch.setChecked(hapticEnabled, false)
 
         // Haptic feedback switch listener
-        hapticFeedbackSwitch.setOnCheckedChangeListener { _, isChecked ->
+        hapticFeedbackSwitch.onCheckedChangeListener = { isChecked ->
             prefs.edit().putBoolean("haptic_feedback_enabled", isChecked).apply()
 
             // Send update to overlay service
@@ -152,7 +181,7 @@ class MainActivity : AppCompatActivity() {
                 sendHapticStrengthUpdate(progress)
 
                 // Provide haptic feedback when changing strength
-                if (hapticFeedbackSwitch.isChecked) {
+                if (hapticFeedbackSwitch.isChecked()) {
                     hapticFeedbackSwitch.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
                 }
             }
@@ -162,43 +191,84 @@ class MainActivity : AppCompatActivity() {
         })
 
         // Volume Number Display Switch
-        val volumeNumberDisplaySwitch: Switch = findViewById(R.id.volumeNumberDisplaySwitch)
+        val volumeNumberDisplaySwitch: CustomAnimatedSwitch = findViewById(R.id.volumeNumberDisplaySwitch)
 
         // Retrieve saved volume number display setting (default enabled)
         val volumeNumberEnabled = prefs.getBoolean("volume_number_display_enabled", true)
-        volumeNumberDisplaySwitch.isChecked = volumeNumberEnabled
+        volumeNumberDisplaySwitch.setChecked(volumeNumberEnabled, false)
 
         // Volume number display switch listener
-        volumeNumberDisplaySwitch.setOnCheckedChangeListener { _, isChecked ->
+        volumeNumberDisplaySwitch.onCheckedChangeListener = { isChecked ->
             prefs.edit().putBoolean("volume_number_display_enabled", isChecked).apply()
 
             // Send update to overlay service
             sendVolumeNumberDisplayUpdate(isChecked)
 
             // Provide haptic feedback when toggling the switch
-            if (hapticFeedbackSwitch.isChecked) {
+            if (hapticFeedbackSwitch.isChecked()) {
                 volumeNumberDisplaySwitch.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
             }
         }
 
         // Progress Bar Display Switch
-        val progressBarDisplaySwitch: Switch = findViewById(R.id.progressBarDisplaySwitch)
+        val progressBarDisplaySwitch: CustomAnimatedSwitch = findViewById(R.id.progressBarDisplaySwitch)
 
         // Retrieve saved progress bar display setting (default enabled)
         val progressBarEnabled = prefs.getBoolean("progress_bar_display_enabled", true)
-        progressBarDisplaySwitch.isChecked = progressBarEnabled
+        progressBarDisplaySwitch.setChecked(progressBarEnabled, false)
 
         // Progress bar display switch listener
-        progressBarDisplaySwitch.setOnCheckedChangeListener { _, isChecked ->
+        progressBarDisplaySwitch.onCheckedChangeListener = { isChecked ->
             prefs.edit().putBoolean("progress_bar_display_enabled", isChecked).apply()
 
             // Send update to overlay service
             sendProgressBarDisplayUpdate(isChecked)
 
             // Provide haptic feedback when toggling the switch
-            if (hapticFeedbackSwitch.isChecked) {
+            if (hapticFeedbackSwitch.isChecked()) {
                 progressBarDisplaySwitch.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
             }
+        }
+
+        // Volume Theme Button
+        val volumeThemeButton: Button = findViewById(R.id.volumeThemeButton)
+        
+        // Initialize theme button text
+        val currentTheme = prefs.getInt("volume_theme", 0)
+        val themeText = when (currentTheme) {
+            0 -> "Light"
+            1 -> "Dark"
+            2 -> "System"
+            else -> "Light"
+        }
+        volumeThemeButton.text = themeText
+
+        volumeThemeButton.setOnClickListener {
+            val currentThemeValue = prefs.getInt("volume_theme", 0)
+            val nextThemeValue = (currentThemeValue + 1) % 3 // Cycle through 0, 1, 2
+            
+            val (nextThemeText, nextTheme) = when (nextThemeValue) {
+                0 -> "Light" to VolumeDialView.VolumeTheme.LIGHT
+                1 -> "Dark" to VolumeDialView.VolumeTheme.DARK
+                2 -> "System" to VolumeDialView.VolumeTheme.SYSTEM
+                else -> "Light" to VolumeDialView.VolumeTheme.LIGHT
+            }
+            
+            // Update button text
+            volumeThemeButton.text = nextThemeText
+            
+            // Save preference
+            prefs.edit().putInt("volume_theme", nextThemeValue).apply()
+            
+            // Update active overlay if it exists
+            sendVolumeThemeUpdate(nextTheme)
+            
+            // Provide haptic feedback when toggling the theme
+            if (hapticFeedbackSwitch.isChecked()) {
+                volumeThemeButton.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+            }
+            
+            Log.d("MainActivity", "Volume theme updated: $nextThemeText")
         }
 
         // EditText Listener
@@ -250,6 +320,18 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, VolumeOverlayService::class.java)
         intent.action = "UPDATE_PROGRESS_BAR_DISPLAY"
         intent.putExtra("PROGRESS_BAR_DISPLAY_ENABLED", isEnabled)
+        startService(intent)
+    }
+
+    private fun sendVolumeThemeUpdate(theme: VolumeDialView.VolumeTheme) {
+        val intent = Intent(this, VolumeOverlayService::class.java)
+        intent.action = "UPDATE_VOLUME_THEME"
+        val themeValue = when (theme) {
+            VolumeDialView.VolumeTheme.LIGHT -> 0
+            VolumeDialView.VolumeTheme.DARK -> 1
+            VolumeDialView.VolumeTheme.SYSTEM -> 2
+        }
+        intent.putExtra("VOLUME_THEME", themeValue)
         startService(intent)
     }
 

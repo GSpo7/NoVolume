@@ -65,6 +65,36 @@
             android:backgroundTint="@color/red" />
     </LinearLayout>
 
+    <!-- Do Not Disturb Permission Row -->
+    <LinearLayout
+        android:id="@+id/dndPermissionLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/accessibilitySettingsLayout"
+        android:layout_marginTop="20dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_centerHorizontal="true">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Grant Do Not Disturb Access"
+            android:textColor="@color/white"
+            android:fontFamily="@font/ntype"
+            android:textSize="16sp" />
+
+        <Button
+            android:id="@+id/dndPermissionButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Go"
+            android:textColor="@android:color/white"
+            android:fontFamily="@font/ntype"
+            android:backgroundTint="@color/red" />
+    </LinearLayout>
+
     <!-- Overlay Position Label -->
     <TextView
         android:id="@+id/overlayPositionLabel"
@@ -74,7 +104,7 @@
         android:textColor="@color/white"
         android:fontFamily="@font/ntype"
         android:textSize="18sp"
-        android:layout_below="@id/accessibilitySettingsLayout"
+        android:layout_below="@id/dndPermissionLayout"
         android:layout_centerHorizontal="true"
         android:layout_marginTop="30dp" />
 
@@ -170,14 +200,11 @@
                 android:textSize="16sp"
                 android:gravity="center" />
 
-            <Switch
+            <com.nostudio.novolumeslider.CustomAnimatedSwitch
                 android:id="@+id/hapticToggleSwitch"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:checked="true"
-                android:thumbTint="@color/white"
-                android:trackTint="@color/white" />
+                android:layout_marginTop="10dp" />
         </LinearLayout>
 
         <!-- Number Display Column -->
@@ -197,14 +224,11 @@
                 android:textSize="16sp"
                 android:gravity="center" />
 
-            <Switch
+            <com.nostudio.novolumeslider.CustomAnimatedSwitch
                 android:id="@+id/volumeNumberDisplaySwitch"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:checked="true"
-                android:thumbTint="@color/white"
-                android:trackTint="@color/white" />
+                android:layout_marginTop="10dp" />
         </LinearLayout>
 
         <!-- Progress Bar Display Column -->
@@ -224,14 +248,51 @@
                 android:textSize="16sp"
                 android:gravity="center" />
 
-            <Switch
+            <com.nostudio.novolumeslider.CustomAnimatedSwitch
                 android:id="@+id/progressBarDisplaySwitch"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="10dp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Volume Theme Settings Row -->
+    <LinearLayout
+        android:id="@+id/volumeThemeLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_below="@id/uiTogglesContainer"
+        android:layout_marginTop="20dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:layout_centerHorizontal="true">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:gravity="center">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Volume Theme"
+                android:textColor="@color/white"
+                android:fontFamily="@font/ntype"
+                android:textSize="16sp"
+                android:gravity="center" />
+
+            <Button
+                android:id="@+id/volumeThemeButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
                 android:layout_marginTop="10dp"
-                android:checked="true"
-                android:thumbTint="@color/white"
-                android:trackTint="@color/white" />
+                android:text="Light"
+                android:textColor="@android:color/white"
+                android:fontFamily="@font/ntype"
+                android:backgroundTint="@color/red"
+                android:minWidth="100dp" />
         </LinearLayout>
     </LinearLayout>
 </RelativeLayout>

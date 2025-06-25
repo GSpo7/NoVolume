@@ -27,16 +27,18 @@ import android.widget.TextView
 import androidx.core.animation.doOnEnd
 import androidx.core.animation.doOnStart
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import kotlin.math.pow
 import kotlin.math.sqrt
 import android.widget.FrameLayout
+import android.content.res.Configuration
 
 class VolumeOverlayService : Service() {
 
     private lateinit var windowManager: WindowManager
     private lateinit var overlayView: View
     private lateinit var fullScreenTouchView: View // Full screen touch view
-    private lateinit var audioManager: AudioManager
+    private lateinit var volumeStreamManager: VolumeStreamManager
     private lateinit var volumeDial: VolumeDialView
     private lateinit var volumeNumber: TextView
 
@@ -58,6 +60,9 @@ class VolumeOverlayService : Service() {
     // Flag to track if user is currently touching the dial
     private var isTouching = false
 
+    // Flag to track if user is currently interacting with multistream buttons
+    private var isInteractingWithButtons = false
+
     private var accumulatedYOffset: Float = 0f
 
     private var isOverlayVisible = false
@@ -74,7 +79,7 @@ class VolumeOverlayService : Service() {
         startForegroundServiceWithNotification()
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        volumeStreamManager = VolumeStreamManager(this)
 
         // Inflate the overlay layout
         overlayView = LayoutInflater.from(this).inflate(R.layout.custom_volume_overlay, null)
@@ -86,16 +91,28 @@ class VolumeOverlayService : Service() {
         // Set up the touch volume change listener
         volumeDial.setOnVolumeChangeListener(object : VolumeDialView.OnVolumeChangeListener {
             override fun onVolumeChanged(volume: Int) {
-                // Update system volume
-                updateSystemVolume(volume)
+                val activeStream = volumeStreamManager.getActiveStream()
+                
+                // CRITICAL FIX: Track manual muting vs quick action muting
+                if (volume == 0) {
+                    // User manually set volume to 0 - mark as manually muted
+                    volumeStreamManager.markStreamAsManuallyMuted(activeStream)
+                } else {
+                    // Volume is not 0 - clear any mute status
+                    volumeStreamManager.clearQuickActionMuteStatus(activeStream)
+                }
+                
+                // Use the safer method to prevent unwanted ringer mode changes
+                volumeStreamManager.setStreamVolumeSafely(activeStream, (volume * volumeStreamManager.getStreamMaxVolume(activeStream)) / 100)
+                val actualVolume = volumeStreamManager.getStreamVolumePercentage(activeStream)
 
                 // Update UI - but check mode first
                 val appPrefs = getSharedPreferences("AppPrefs", Context.MODE_PRIVATE)
                 val volumeNumberDisplayEnabled = appPrefs.getBoolean("volume_number_display_enabled", true)
 
-                // Never show volume number in pop-out mode, regardless of touch interaction
-                if (volumeNumberDisplayEnabled && !volumeDial.isInPopOutMode()) {
-                    volumeNumber.text = volume.toString()
+                // Never show volume number in pop-out mode or quick action mode, regardless of touch interaction
+                if (volumeNumberDisplayEnabled && !volumeDial.isInPopOutMode() && !volumeDial.isInQuickActionMode()) {
+                    volumeNumber.text = actualVolume.toString()  // Use actual volume instead of requested
                     volumeNumber.visibility = View.VISIBLE
 
                     // Don't hide number while touching
@@ -106,6 +123,9 @@ class VolumeOverlayService : Service() {
                     hideNumberHandler.removeCallbacks(hideNumberRunnable)
                 }
 
+                // Update stream icons to reflect new volume levels
+                volumeDial.updateStreamIcons()
+
                 // Handle overlay timer extension for touch interaction (same as volume buttons)
                 if (volumeDial.isInPopOutMode()) {
                     // In pop-out mode, extend overlay visibility timer
@@ -113,42 +133,53 @@ class VolumeOverlayService : Service() {
                     hideOverlayHandler.postDelayed(hideOverlayRunnable, 4000)
                 }
 
-                Log.d("VolumeOverlayService", "Volume changed via touch - In pop-out: ${volumeDial.isInPopOutMode()}, Number visible: ${volumeNumber.visibility}")
+
             }
 
             override fun onTouchStart() {
-                // User started touching the dial
+                // User started touching the dial or interacting with buttons
                 isTouching = true
+
+                // If we're in pop-out mode, this could be button interaction
+                if (volumeDial.isInPopOutMode()) {
+                    isInteractingWithButtons = true
+                }
 
                 // Cancel any pending hide operations
                 hideNumberHandler.removeCallbacks(hideNumberRunnable)
                 hideOverlayHandler.removeCallbacks(hideOverlayRunnable)
 
-                Log.d("VolumeOverlayService", "Touch started on dial, pop-out mode: ${volumeDial.isInPopOutMode()}")
+    
             }
 
             override fun onTouchEnd() {
-                // User stopped touching the dial
+                // User stopped touching the dial or buttons
                 isTouching = false
+                isInteractingWithButtons = false
 
-                // Schedule hiding the number after 2 seconds (only if not in pop-out mode)
-                if (!volumeDial.isInPopOutMode()) {
+                // Schedule hiding the number after 2 seconds (only if not in pop-out mode or quick action mode)
+                if (!volumeDial.isInPopOutMode() && !volumeDial.isInQuickActionMode()) {
                     hideNumberHandler.postDelayed(hideNumberRunnable, 2000)
                 }
 
-                // Schedule hiding the overlay - use different timing based on pop-out mode
-                if (volumeDial.isInPopOutMode()) {
-                    // In pop-out mode, extend the timer to match the 5-second auto-return + buffer
-                    hideOverlayHandler.postDelayed(hideOverlayRunnable, 4000)
-                } else {
-                    // Normal mode, use standard timing
-                    hideOverlayHandler.postDelayed(hideOverlayRunnable, 2000)
+                // Schedule hiding the overlay - use different timing based on mode
+                val timeout = when {
+                    volumeDial.isInPopOutMode() -> 4000L
+                    volumeDial.isInQuickActionMode() -> 3000L
+                    else -> 2000L
                 }
+                hideOverlayHandler.postDelayed(hideOverlayRunnable, timeout)
 
-                Log.d("VolumeOverlayService", "Touch ended on dial, pop-out mode: ${volumeDial.isInPopOutMode()}")
+
             }
 
             override fun onDismiss() {
+                // Reset quick action state immediately when dismissed by outside tap
+                if (volumeDial.isInQuickActionMode()) {
+                    volumeDial.forceExitQuickActionMode()
+                    Log.d("VolumeOverlayService", "Quick action state reset due to outside tap dismissal")
+                }
+                
                 // For outside tap dismissal, use smooth reset during overlay fade
                 hideOverlayWithSmoothReset()
                 Log.d("VolumeOverlayService", "Overlay dismissed by outside tap - using smooth reset")
@@ -159,6 +190,44 @@ class VolumeOverlayService : Service() {
                 // Open classic Android volume bar
                 showSystemVolumeBar()
                 Log.d("VolumeOverlayService", "Slide right detected, opening classic volume bar")
+            }
+            
+            override fun onStreamChanged(stream: VolumeStreamManager.VolumeStream) {
+                // Update the active stream in the volume manager
+                volumeStreamManager.setActiveStream(stream)
+                
+                // CRITICAL FIX: Save the selected stream to shared preferences so volume keys work correctly
+                // This ensures that when the user selects a button (even without centering it), 
+                // the hardware volume keys will control the correct stream
+                val overlayStatePrefs = getSharedPreferences("VolumeOverlayState", Context.MODE_PRIVATE)
+                overlayStatePrefs.edit().putString("selected_stream", stream.name).apply()
+                
+                // Update the volume display to show the new stream's current volume
+                val volumePercentage = volumeStreamManager.getStreamVolumePercentage(stream)
+                
+                // Update the dial volume without triggering system volume change
+                volumeDial.volume = volumePercentage
+                
+                // Update stream icons to reflect current state
+                volumeDial.updateStreamIcons()
+                
+                // Update volume number display
+                val appPrefs = getSharedPreferences("AppPrefs", Context.MODE_PRIVATE)
+                val volumeNumberDisplayEnabled = appPrefs.getBoolean("volume_number_display_enabled", true)
+                
+                if (volumeNumberDisplayEnabled && !volumeDial.isInPopOutMode() && !volumeDial.isInQuickActionMode()) {
+                    volumeNumber.text = volumePercentage.toString()
+                    volumeNumber.visibility = View.VISIBLE
+                    
+                    // Cancel any pending number hiding
+                    hideNumberHandler.removeCallbacks(hideNumberRunnable)
+                    hideNumberHandler.postDelayed(hideNumberRunnable, 2000)
+                } else {
+                    volumeNumber.visibility = View.GONE
+                    hideNumberHandler.removeCallbacks(hideNumberRunnable)
+                }
+                
+                Log.d("VolumeOverlayService", "Stream changed to ${stream.displayName}, volume: $volumePercentage%, saved to prefs for volume key handling")
             }
         })
 
@@ -173,8 +242,17 @@ class VolumeOverlayService : Service() {
             }
         })
 
-        // Initialize wheel size and haptic feedback settings
-        initializeSettings()
+            // Initialize wheel size and haptic feedback settings
+    initializeSettings()
+    
+    // Set the VolumeStreamManager reference for dynamic icon selection
+    volumeDial.setVolumeStreamManager(volumeStreamManager)
+    
+    // Initialize theme
+    initializeTheme()
+        
+        // Set the VolumeDialView reference in VolumeStreamManager for volume restoration
+        volumeStreamManager.setVolumeDialView(volumeDial)
 
         volumeDial.setInteractionListener(object : VolumeDialView.InteractionListener {
             override fun onInteractionStart() {
@@ -213,11 +291,15 @@ class VolumeOverlayService : Service() {
         // Create layout parameters for the full-screen touch view
         val fullScreenParams = WindowManager.LayoutParams().apply {
             type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
             format = PixelFormat.TRANSLUCENT
             width = WindowManager.LayoutParams.MATCH_PARENT
             height = WindowManager.LayoutParams.MATCH_PARENT
             gravity = Gravity.CENTER
+            windowAnimations = 0
         }
 
         try {
@@ -246,12 +328,15 @@ class VolumeOverlayService : Service() {
         // Create overlay layout parameters
         val params = WindowManager.LayoutParams().apply {
             type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-            flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+            flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
             format = PixelFormat.TRANSLUCENT
-            width = initialWidth // Use calculated width instead of WRAP_CONTENT
+            width = initialWidth
             height = WindowManager.LayoutParams.WRAP_CONTENT
-            gravity = Gravity.TOP or Gravity.START // Align to the top-left corner
-            windowAnimations = android.R.style.Animation_Activity
+            gravity = Gravity.TOP or Gravity.START
+            windowAnimations = 0
         }
 
         try {
@@ -272,22 +357,55 @@ class VolumeOverlayService : Service() {
         updateOverlayPosition(savedYOffset)
 
         if (intent != null) {
-            // Get volume from intent
-            val currentVolume = intent.getIntExtra("CURRENT_VOLUME", -1)
-            val maxVolume = intent.getIntExtra("MAX_VOLUME", -1)
-
-            if (currentVolume != -1 && maxVolume != -1) {
-                Log.d("VolumeOverlayService", "Received volume: $currentVolume/$maxVolume")
-
-                // Convert to percentage (0-100)
-                val volumePercentage = (currentVolume * 100) / maxVolume
-                updateVolumeUI(volumePercentage)
-            } else {
-                // If no volume data, use current system volume
-                val volume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC)
-                val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-                val volumePercentage = (volume * 100) / max
-                updateVolumeUI(volumePercentage)
+            // Handle different intent actions
+            when (intent.action) {
+                "VOLUME_CHANGED" -> {
+                    val streamType = intent.getIntExtra("STREAM_TYPE", -1)
+                    val currentVolume = intent.getIntExtra("CURRENT_VOLUME", -1)
+                    val previousVolume = intent.getIntExtra("PREVIOUS_VOLUME", -1)
+                    
+                    if (streamType != -1) {
+                        val stream = volumeStreamManager.getStreamByType(streamType)
+                        if (stream != null) {
+                            volumeStreamManager.setActiveStream(stream)
+                            val volumePercentage = volumeStreamManager.getStreamVolumePercentage(stream)
+                            updateVolumeUI(volumePercentage, stream)
+                        }
+                    }
+                }
+                "RINGER_MODE_CHANGED" -> {
+                    val ringerMode = intent.getIntExtra("RINGER_MODE", -1)
+                    handleRingerModeChange(ringerMode)
+                }
+                "DND_MODE_CHANGED" -> {
+                    handleDndModeChange()
+                }
+                else -> {
+                    // Legacy handling for direct volume updates
+                    val currentVolume = intent.getIntExtra("CURRENT_VOLUME", -1)
+                    val activeStreamName = intent.getStringExtra("ACTIVE_STREAM")
+                    val streamType = intent.getIntExtra("STREAM_TYPE", -1)
+                    
+                    if (currentVolume != -1) {
+                        // Try to get the active stream from intent
+                        var activeStream = volumeStreamManager.getActiveStream()
+                        if (activeStreamName != null) {
+                            try {
+                                activeStream = VolumeStreamManager.VolumeStream.valueOf(activeStreamName)
+                                volumeStreamManager.setActiveStream(activeStream)
+                            } catch (e: IllegalArgumentException) {
+                                Log.w("VolumeOverlayService", "Invalid stream name: $activeStreamName")
+                            }
+                        }
+                        
+                        updateVolumeUI(currentVolume, activeStream)
+                    } else {
+                        // If no volume data, use current system volume for active stream
+                        val activeStream = volumeStreamManager.getActiveStream()
+                        val volumePercentage = volumeStreamManager.getStreamVolumePercentage(activeStream)
+                        updateVolumeUI(volumePercentage, activeStream)
+                    }
+                }
             }
         }
 
@@ -329,6 +447,17 @@ class VolumeOverlayService : Service() {
             updateProgressBarDisplay(enabled)
         }
 
+        if (intent?.action == "UPDATE_VOLUME_THEME") {
+            val themeValue = intent.getIntExtra("VOLUME_THEME", 0)
+            val theme = when (themeValue) {
+                0 -> VolumeDialView.VolumeTheme.LIGHT
+                1 -> VolumeDialView.VolumeTheme.DARK
+                2 -> VolumeDialView.VolumeTheme.SYSTEM
+                else -> VolumeDialView.VolumeTheme.LIGHT
+            }
+            updateVolumeTheme(theme)
+        }
+
         if (intent?.action != "HIDE_OVERLAY") {
             showOverlay()
         }
@@ -337,12 +466,15 @@ class VolumeOverlayService : Service() {
         return START_NOT_STICKY
     }
 
-    private fun updateVolumeUI(volumePercentage: Int) {
+    private fun updateVolumeUI(volumePercentage: Int, activeStream: VolumeStreamManager.VolumeStream) {
         // Update the stored precise volume level
         preciseVolumeLevel = volumePercentage
 
         // Update the dial view
         volumeDial.volume = volumePercentage
+        
+        // Update the dial with the active stream information
+        volumeDial.setActiveStream(activeStream)
 
         // Notify dial of external volume change to reset pop-out timer
         volumeDial.onExternalVolumeChange()
@@ -354,10 +486,11 @@ class VolumeOverlayService : Service() {
             hideOverlayHandler.postDelayed(hideOverlayRunnable, 4000)
             Log.d("VolumeOverlayService", "Volume button pressed in pop-out mode - extended overlay timer")
         } else {
-            // In normal mode, reset overlay timer if not currently touching
-            if (!isTouching) {
+            // In normal mode, reset overlay timer if not currently touching or interacting with buttons
+            if (!isTouching && !isInteractingWithButtons) {
                 hideOverlayHandler.removeCallbacks(hideOverlayRunnable)
-                hideOverlayHandler.postDelayed(hideOverlayRunnable, 2000)
+                val timeout = if (volumeDial.isInQuickActionMode()) 3000L else 2000L
+                hideOverlayHandler.postDelayed(hideOverlayRunnable, timeout)
             }
         }
 
@@ -372,8 +505,8 @@ class VolumeOverlayService : Service() {
             // Cancel any pending number hiding
             hideNumberHandler.removeCallbacks(hideNumberRunnable)
 
-            // Only schedule hiding if not currently touching
-            if (!isTouching) {
+            // Only schedule hiding if not currently touching or interacting with buttons
+            if (!isTouching && !isInteractingWithButtons) {
                 hideNumberHandler.postDelayed(hideNumberRunnable, 2000)
             }
         } else {
@@ -382,46 +515,20 @@ class VolumeOverlayService : Service() {
             hideNumberHandler.removeCallbacks(hideNumberRunnable)
         }
 
-        Log.d("VolumeOverlayService", "Volume UI updated - External change, In pop-out: ${volumeDial.isInPopOutMode()}, Number visible: ${volumeNumber.visibility}")
+
+    }
+    
+    // Legacy method for backward compatibility
+    private fun updateVolumeUI(volumePercentage: Int) {
+        val activeStream = volumeStreamManager.getActiveStream()
+        updateVolumeUI(volumePercentage, activeStream)
     }
 
     private fun updateSystemVolume(volumePercentage: Int) {
         preciseVolumeLevel = volumePercentage
-
-        val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
-        val newVolume = (volumePercentage * maxVolume) / 100  // Convert 100 steps to system range
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            // Android 9+ (Pie) - Use hidden API for fine control
-            try {
-                val audioSystemClass = Class.forName("android.media.AudioSystem")
-                val setVolumeIndexMethod = audioSystemClass.getMethod(
-                    "setStreamVolumeIndex",
-                    Int::class.java,
-                    Int::class.java,
-                    Int::class.java
-                )
-
-                val DEVICE_OUT_SPEAKER = 2 // Speaker output device
-                val preciseIndex = (volumePercentage * 1000) / 100  // Scale for precision
-
-                setVolumeIndexMethod.invoke(null, AudioManager.STREAM_MUSIC, preciseIndex, DEVICE_OUT_SPEAKER)
-
-                // Also update system UI to match
-                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
-
-                Log.d("VolumeOverlayService", "Precise volume set using AudioSystem API")
-            } catch (e: Exception) {
-                Log.e("VolumeOverlayService", "Error setting precise volume: ${e.message}")
-                // Fallback to standard volume setting
-                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
-            }
-        } else {
-            // Android 7-8.1 (API 24-27) - Use standard AudioManager
-            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, newVolume, 0)
-        }
-
-        Log.d("VolumeOverlayService", "System volume set to $volumePercentage%")
+        // Use the VolumeStreamManager to set the active stream volume
+        volumeStreamManager.setActiveStreamVolumePercentage(volumePercentage)
+        Log.d("VolumeOverlayService", "System volume set to $volumePercentage% for active stream")
     }
 
     private fun createNotificationChannel() {
@@ -466,6 +573,9 @@ class VolumeOverlayService : Service() {
             if (volumeDial.isInPopOutMode()) {
                 volumeDial.forceReturnToSemiCircle()
             }
+            
+            // Reset any click animation state to ensure we always start with 4 buttons
+            volumeDial.resetToFourButtonState()
 
             // Position the overlay initially
             overlayView.translationX = -overlayView.width.toFloat() * 0.5f
@@ -504,12 +614,16 @@ class VolumeOverlayService : Service() {
             Log.d("VolumeOverlayService", "Overlay already visible, skipping show animation")
         }
 
-        // Only schedule hiding if not currently touching - respect pop-out mode timing
-        if (!isTouching) {
+        // Only schedule hiding if not currently touching or interacting with buttons - respect pop-out mode timing
+        if (!isTouching && !isInteractingWithButtons) {
             hideOverlayHandler.removeCallbacks(hideOverlayRunnable)
-            val timeout = if (volumeDial.isInPopOutMode()) 4000L else 2000L
+            val timeout = when {
+                volumeDial.isInPopOutMode() -> 4000L
+                volumeDial.isInQuickActionMode() -> 3000L
+                else -> 2000L
+            }
             hideOverlayHandler.postDelayed(hideOverlayRunnable, timeout)
-            Log.d("VolumeOverlayService", "showOverlay() - scheduled hide timeout: ${timeout}ms, pop-out mode: ${volumeDial.isInPopOutMode()}")
+            Log.d("VolumeOverlayService", "showOverlay() - scheduled hide timeout: ${timeout}ms, pop-out: ${volumeDial.isInPopOutMode()}, quick-action: ${volumeDial.isInQuickActionMode()}")
         }
     }
 
@@ -579,6 +693,19 @@ class VolumeOverlayService : Service() {
         }
     }
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        
+        // Handle system theme changes when in system mode
+        val appPrefs = getSharedPreferences("AppPrefs", Context.MODE_PRIVATE)
+        val themeValue = appPrefs.getInt("volume_theme", 0)
+        if (themeValue == 2) { // System theme mode
+            val theme = VolumeDialView.VolumeTheme.SYSTEM
+            updateVolumeNumberColor(theme)
+            Log.d("VolumeOverlayService", "Configuration changed - updated system theme colors")
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         if (::windowManager.isInitialized) {
@@ -623,7 +750,17 @@ class VolumeOverlayService : Service() {
 
     private fun showSystemVolumeBar() {
         try {
-            audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_SAME, AudioManager.FLAG_SHOW_UI)
+            val activeStream = volumeStreamManager.getActiveStream()
+            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            
+            // Use safe flags - avoid FLAG_ALLOW_RINGER_MODES for non-ring streams
+            val flags = if (activeStream == VolumeStreamManager.VolumeStream.RING) {
+                AudioManager.FLAG_SHOW_UI or AudioManager.FLAG_ALLOW_RINGER_MODES
+            } else {
+                AudioManager.FLAG_SHOW_UI
+            }
+            
+            audioManager.adjustStreamVolume(activeStream.streamType, AudioManager.ADJUST_SAME, flags)
         } catch (e: SecurityException) {
             Log.e("VolumeOverlayService", "SecurityException showing system volume bar: ${e.message}")
         }
@@ -662,7 +799,7 @@ class VolumeOverlayService : Service() {
         val progressBarDisplayEnabled = appPrefs.getBoolean("progress_bar_display_enabled", true)
         volumeDial.setProgressBarDisplayEnabled(progressBarDisplayEnabled)
 
-        Log.d("VolumeOverlayService", "Settings initialized - Scale: $savedScaleFactor, Text: $scaledTextSize, Haptic: $hapticEnabled, Strength: $hapticStrength, VolumeDisplay: $volumeNumberDisplayEnabled")
+
     }
 
     private fun updateWheelSize(scaleFactor: Float) {
@@ -719,12 +856,85 @@ class VolumeOverlayService : Service() {
         volumeDial.setProgressBarDisplayEnabled(enabled)
         Log.d("VolumeOverlayService", "Progress bar display updated - Enabled: $enabled")
     }
+    
+    private fun initializeTheme() {
+        val appPrefs = getSharedPreferences("AppPrefs", Context.MODE_PRIVATE)
+        val themeValue = appPrefs.getInt("volume_theme", 0) // 0=Light, 1=Dark, 2=System
+        val theme = when (themeValue) {
+            0 -> VolumeDialView.VolumeTheme.LIGHT
+            1 -> VolumeDialView.VolumeTheme.DARK
+            2 -> VolumeDialView.VolumeTheme.SYSTEM
+            else -> VolumeDialView.VolumeTheme.LIGHT
+        }
+        
+        volumeDial.setVolumeTheme(theme)
+        updateVolumeNumberColor(theme)
+        Log.d("VolumeOverlayService", "Theme initialized: $theme")
+    }
+    
+    private fun updateVolumeNumberColor(theme: VolumeDialView.VolumeTheme) {
+        val isDarkMode = when (theme) {
+            VolumeDialView.VolumeTheme.LIGHT -> false
+            VolumeDialView.VolumeTheme.DARK -> true
+            VolumeDialView.VolumeTheme.SYSTEM -> isSystemInDarkMode()
+        }
+        
+        val textColor = if (isDarkMode) {
+            ContextCompat.getColor(this, R.color.volume_number_dark) // White in dark mode
+        } else {
+            ContextCompat.getColor(this, R.color.volume_number_light) // Black in light mode
+        }
+        
+        volumeNumber.setTextColor(textColor)
+        Log.d("VolumeOverlayService", "Updated volume number color - Theme: $theme, isDarkMode: $isDarkMode, Color: ${String.format("#%08X", textColor)}")
+    }
+    
+    private fun isSystemInDarkMode(): Boolean {
+        return when (resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) {
+            android.content.res.Configuration.UI_MODE_NIGHT_YES -> true
+            else -> false
+        }
+    }
+    
+    fun updateVolumeTheme(theme: VolumeDialView.VolumeTheme) {
+        volumeDial.setVolumeTheme(theme)
+        updateVolumeNumberColor(theme)
+        
+        // Save theme preference
+        val appPrefs = getSharedPreferences("AppPrefs", Context.MODE_PRIVATE)
+        val themeValue = when (theme) {
+            VolumeDialView.VolumeTheme.LIGHT -> 0
+            VolumeDialView.VolumeTheme.DARK -> 1
+            VolumeDialView.VolumeTheme.SYSTEM -> 2
+        }
+        appPrefs.edit().putInt("volume_theme", themeValue).apply()
+        
+        Log.d("VolumeOverlayService", "Volume theme updated: $theme")
+    }
+    
+    private fun handleRingerModeChange(ringerMode: Int) {
+        Log.d("VolumeOverlayService", "Ringer mode changed to: ${volumeStreamManager.getRingerModeDisplayName(ringerMode)}")
+        // Update UI to reflect ringer mode change if needed
+        // This could trigger a brief overlay showing the new ringer mode
+        if (ringerMode != -1) {
+            // Show overlay briefly to indicate ringer mode change
+            showOverlay()
+        }
+    }
+    
+    private fun handleDndModeChange() {
+        val dndMode = volumeStreamManager.getDndMode()
+        Log.d("VolumeOverlayService", "DND mode changed to: ${volumeStreamManager.getDndModeDisplayName(dndMode)}")
+        // Update UI to reflect DND mode change if needed
+        // This could trigger a brief overlay showing the new DND mode
+        showOverlay()
+    }
 
     private fun handlePopOutModeChange(isInPopOutMode: Boolean) {
         if (isInPopOutMode) {
             // Entering pop-out mode - extend overlay visibility
             hideOverlayHandler.removeCallbacks(hideOverlayRunnable)
-            // Set a longer timeout for pop-out mode (7 seconds to accommodate 5s + 2s buffer)
+            // Set a longer timeout for pop-out mode
             hideOverlayHandler.postDelayed(hideOverlayRunnable, 4000)
             Log.d("VolumeOverlayService", "Entered pop-out mode - extended overlay visibility")
         } else {
@@ -745,23 +955,38 @@ class VolumeOverlayService : Service() {
             val scaleFactor = appPrefs.getFloat("wheel_scale_factor", 0.975f)
             val radius = baseRadius * scaleFactor
 
-            // Hide volume number during pop-out
-            if (volumeDial.isInPopOutMode()) {
-                volumeNumber.visibility = View.GONE
-            } else {
-                // Only show if volume number display is enabled in settings and not in pop-out mode
-                val volumeNumberDisplayEnabled = appPrefs.getBoolean("volume_number_display_enabled", true)
-                volumeNumber.visibility = if (volumeNumberDisplayEnabled) View.VISIBLE else View.GONE
+            // Apply smooth fade animation to volume number during pop-out transition
+            val volumeNumberDisplayEnabled = appPrefs.getBoolean("volume_number_display_enabled", true)
 
-                // Update volume number position to move with the center of the dial
-                val volumeNumberParams = volumeNumber.layoutParams as FrameLayout.LayoutParams
-                val baseMargin = (10 * scaleFactor).toInt()
-                val popOutOffset = (radius * progress).toInt()
-                volumeNumberParams.marginStart = baseMargin + popOutOffset
-                volumeNumber.layoutParams = volumeNumberParams
+            if (volumeNumberDisplayEnabled) {
+                // Calculate fade alpha with slower fade curve for more visual appeal
+                val fadeAlpha = (1f - progress * progress).coerceIn(0f, 1f) // Quadratic fade for smoother effect
+
+                // Apply fade effect
+                volumeNumber.alpha = fadeAlpha
+
+                // Keep volume number visible during transition for smooth fade
+                if (progress < 1f) {
+                    volumeNumber.visibility = View.VISIBLE
+
+                    // Update volume number position to move with the center of the dial during transition
+                    val volumeNumberParams = volumeNumber.layoutParams as FrameLayout.LayoutParams
+                    val baseMargin = (10 * scaleFactor).toInt()
+                    val popOutOffset = (radius * progress * 0.2f).toInt() // Even more subtle movement during fade
+                    volumeNumberParams.marginStart = baseMargin + popOutOffset
+                    volumeNumber.layoutParams = volumeNumberParams
+                } else {
+                    // Fully in pop-out mode - hide completely
+                    volumeNumber.visibility = View.GONE
+                    volumeNumber.alpha = 0f
+                }
+            } else {
+                // Volume number display is disabled - keep it hidden
+                volumeNumber.visibility = View.GONE
+                volumeNumber.alpha = 0f
             }
 
-            Log.d("VolumeOverlayService", "Pop-out progress: $progress, In pop-out mode: ${volumeDial.isInPopOutMode()}, Volume number visibility: ${volumeNumber.visibility}")
+            Log.d("VolumeOverlayService", "Pop-out progress: $progress, Volume number alpha: ${volumeNumber.alpha}, Number visible: ${volumeNumber.visibility}")
 
         } catch (e: Exception) {
             Log.e("VolumeOverlayService", "Error updating overlay for pop-out: ${e.message}")
@@ -778,12 +1003,22 @@ class VolumeOverlayService : Service() {
                 hideOverlayHandler.removeCallbacks(hideOverlayRunnable)
                 hideNumberHandler.removeCallbacks(hideNumberRunnable)
 
-                // Reset volume number visibility to user preference
+                // Clear centered stream state when returning to semi-circle
+                clearCenteredStreamState()
+
+                // Reset volume number visibility and alpha to user preference
                 val appPrefs = getSharedPreferences("AppPrefs", Context.MODE_PRIVATE)
                 val volumeNumberDisplayEnabled = appPrefs.getBoolean("volume_number_display_enabled", true)
                 volumeNumber.visibility = if (volumeNumberDisplayEnabled) View.VISIBLE else View.GONE
+                volumeNumber.alpha = 1f // Restore full opacity
 
-                Log.d("VolumeOverlayService", "Reset to semi-circle state - volume number visibility: ${volumeNumber.visibility}")
+                Log.d("VolumeOverlayService", "Reset to semi-circle state - volume number visibility: ${volumeNumber.visibility}, alpha: ${volumeNumber.alpha}")
+            }
+            
+            // Also reset quick action state when overlay is hidden
+            if (volumeDial.isInQuickActionMode()) {
+                volumeDial.forceExitQuickActionMode()
+                Log.d("VolumeOverlayService", "Quick action state reset during overlay hide")
             }
         } catch (e: Exception) {
             Log.e("VolumeOverlayService", "Error resetting to semi-circle state: ${e.message}")
@@ -840,10 +1075,14 @@ class VolumeOverlayService : Service() {
             hideOverlayHandler.removeCallbacks(hideOverlayRunnable)
             hideNumberHandler.removeCallbacks(hideNumberRunnable)
 
-            // Reset volume number visibility to user preference
+            // Clear centered stream state when overlay is hidden
+            clearCenteredStreamState()
+
+            // Reset volume number visibility and alpha to user preference
             val appPrefs = getSharedPreferences("AppPrefs", Context.MODE_PRIVATE)
             val volumeNumberDisplayEnabled = appPrefs.getBoolean("volume_number_display_enabled", true)
             volumeNumber.visibility = if (volumeNumberDisplayEnabled) View.VISIBLE else View.GONE
+            volumeNumber.alpha = 1f // Restore full opacity
 
             // Reset volume number position to base margin
             val volumeNumberParams = volumeNumber.layoutParams as FrameLayout.LayoutParams
@@ -851,9 +1090,22 @@ class VolumeOverlayService : Service() {
             volumeNumberParams.marginStart = (10 * scaleFactor).toInt()
             volumeNumber.layoutParams = volumeNumberParams
 
-            Log.d("VolumeOverlayService", "Cleanup after hide completed")
+            Log.d("VolumeOverlayService", "Cleanup after hide completed - volume number alpha restored to: ${volumeNumber.alpha}")
         } catch (e: Exception) {
             Log.e("VolumeOverlayService", "Error during cleanup after hide: ${e.message}")
+        }
+    }
+
+    private fun clearCenteredStreamState() {
+        try {
+            val prefs = getSharedPreferences("VolumeOverlayState", Context.MODE_PRIVATE)
+            prefs.edit()
+                .remove("centered_stream")
+                .remove("selected_stream")  // CRITICAL FIX: Also clear selected stream
+                .apply()
+            Log.d("VolumeOverlayService", "Cleared centered and selected stream state")
+        } catch (e: Exception) {
+            Log.e("VolumeOverlayService", "Error clearing stream state: ${e.message}")
         }
     }
 }
